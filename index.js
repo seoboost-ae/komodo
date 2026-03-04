@@ -10,15 +10,17 @@ const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL; // URL Web App GAS /exec
 
 /* ====== KONFIG DOMAIN/PROXY/UA ====== */
 const DOMAINS_MAP = {
-  de: "https://divinglembongan.de",
+  id: "https://diving-komodo.com",
 };
 
+// === Proxy ===
 const PROXIES = {
-  de: process.env.BRD_PROXY_DE, // Germany
+  id: process.env.BRD_PROXY_ID,
 };
 
+// === User Agents ===
 const USER_AGENTS = {
-  de: "DivingLembongan-DE-CacheWarmer/1.0",
+  id: "Diving-Komodo-ID-CacheWarmer/1.0",
 };
 
 /* ====== CLOUDFLARE (opsional) ====== */
