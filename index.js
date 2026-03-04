@@ -10,7 +10,7 @@ const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL; // URL Web App GAS /exec
 
 /* ====== KONFIG DOMAIN/PROXY/UA ====== */
 const DOMAINS_MAP = {
-  id: "https://diving-komod.com",
+  id: "https://diving-komodo.com",
 };
 
 // === Proxy ===
