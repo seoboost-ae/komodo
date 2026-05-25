@@ -23,9 +23,7 @@ const USER_AGENTS = {
   id: "Diving-Komodo-ID-CacheWarmer/1.0",
 };
 
-/* ====== CLOUDFLARE (opsional) ====== */
-const CLOUDFLARE_ZONE_ID = process.env.CLOUDFLARE_ZONE_ID;
-const CLOUDFLARE_API_TOKEN = process.env.CLOUDFLARE_API_TOKEN;
+
 
 /* ====== UTIL ====== */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -57,9 +55,9 @@ class AppsScriptLogger {
     country = "",
     url = "",
     status = "",
-    cfCache = "",
     lsCache = "",
-    cfRay = "",
+    qcCache = "",
+    qcPop = "",
     responseMs = "",
     error = 0,
     message = "",
@@ -71,9 +69,9 @@ class AppsScriptLogger {
       country, // country
       url, // url
       status, // status code
-      cfCache, // cf_cache
-      lsCache, // litespeed_cache
-      cfRay, // cf_ray
+      lsCache, // litespeed_cache (x-litespeed-cache)
+      qcCache, // quic_cloud_cache (x-qc-cache)
+      qcPop, // quic_cloud_pop (x-qc-pop)
       typeof responseMs === "number" ? responseMs : "", // response_ms
       error ? 1 : 0, // error (0/1)
       message, // message
@@ -96,7 +94,7 @@ class AppsScriptLogger {
       const res = await axios.post(
         APPS_SCRIPT_URL,
         { sheetName: this.sheetName, rows: this.rows },
-        { timeout: 20000, headers: { "Content-Type": "application/json" } }
+        { timeout: 60000, headers: { "Content-Type": "application/json" } }
       );
       console.log("Apps Script response:", res.status, res.data);
       if (!res.data?.ok) console.warn("Apps Script replied error:", res.data);
@@ -199,28 +197,7 @@ async function retryableGet(url, cfg, retries = 3) {
   throw lastError;
 }
 
-async function purgeCloudflareCache(url) {
-  if (!CLOUDFLARE_ZONE_ID || !CLOUDFLARE_API_TOKEN) return;
-  try {
-    const purgeRes = await axios.post(
-      `https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}/purge_cache`,
-      { files: [url] },
-      {
-        headers: {
-          Authorization: `Bearer ${CLOUDFLARE_API_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
-    if (purgeRes.data?.success) {
-      console.log(`✅ Cloudflare cache purged: ${url}`);
-    } else {
-      console.warn(`⚠️ Failed to purge Cloudflare: ${url}`);
-    }
-  } catch {
-    console.warn(`❌ Error purging Cloudflare: ${url}`);
-  }
-}
+
 
 async function warmUrls(urls, country, logger, batchSize = 1, delay = 2000) {
   const batches = Array.from(
@@ -240,32 +217,26 @@ async function warmUrls(urls, country, logger, batchSize = 1, delay = 2000) {
           );
           const dt = Date.now() - t0;
 
-          const cfCache = res.headers["cf-cache-status"] || "N/A";
           const lsCache = res.headers["x-litespeed-cache"] || "N/A";
-          const cfRay = res.headers["cf-ray"] || "N/A";
-          const cfEdge = cfRay.includes("-") ? cfRay.split("-")[1] : "N/A";
+          const qcCache = res.headers["x-qc-cache"] || "N/A";
+          const qcPop = res.headers["x-qc-pop"] || "N/A";
 
           console.log(
-            `[${country}] ${res.status} cf=${cfCache} ls=${lsCache} edge=${cfEdge} - ${url}`
+            `[${country}] ${res.status} ls=${lsCache} qc=${qcCache} pop=${qcPop} ${dt}ms - ${url}`
           );
 
           // Kumpulkan log (TIDAK dikirim sekarang; dikirim sekali di akhir run)
           logger.log({
-            country: cfEdge,
+            country,
             url,
             status: res.status,
-            cfCache,
             lsCache,
-            cfRay,
+            qcCache,
+            qcPop,
             responseMs: dt,
             error: 0,
             message: "",
           });
-
-          // Aturan purge: kalau LiteSpeed bukan HIT → purge CF
-          if (String(lsCache).toLowerCase() !== "hit") {
-            await purgeCloudflareCache(url);
-          }
         } catch (err) {
           const dt = Date.now() - t0;
           console.warn(
