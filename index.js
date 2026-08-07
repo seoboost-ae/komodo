@@ -23,7 +23,10 @@ const USER_AGENTS = {
   id: "Diving-Komodo-ID-CacheWarmer/1.0",
 };
 
-
+/* ====== CLOUDFLARE PURGE (opsional) ====== */
+const CLOUDFLARE_ZONE_ID = process.env.CLOUDFLARE_ZONE_ID;
+const CLOUDFLARE_API_TOKEN = process.env.CLOUDFLARE_API_TOKEN;
+let cloudflareConfigWarningShown = false;
 
 /* ====== UTIL ====== */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -197,6 +200,71 @@ async function retryableGet(url, cfg, retries = 3) {
   throw lastError;
 }
 
+function readCacheHeaders(headers) {
+  const lsCache = headers["x-litespeed-cache"] || "N/A";
+  const cfCache = headers["cf-cache-status"] || "N/A";
+  const cfRay = headers["cf-ray"] || "";
+  const cfPop = cfRay.includes("-")
+    ? cfRay.slice(cfRay.lastIndexOf("-") + 1)
+    : "N/A";
+  const cfAge = headers.age || "N/A";
+
+  return { lsCache, cfCache, cfPop, cfAge };
+}
+
+function isLiteSpeedMiss(value) {
+  return String(value)
+    .toLowerCase()
+    .split(",")
+    .map((part) => part.trim())
+    .includes("miss");
+}
+
+async function purgeCloudflareCache(url) {
+  if (!CLOUDFLARE_ZONE_ID || !CLOUDFLARE_API_TOKEN) {
+    if (!cloudflareConfigWarningShown) {
+      console.warn(
+        "Cloudflare purge disabled (missing CLOUDFLARE_ZONE_ID or CLOUDFLARE_API_TOKEN)."
+      );
+      cloudflareConfigWarningShown = true;
+    }
+    return false;
+  }
+
+  try {
+    const purgeRes = await axios.post(
+      `https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}/purge_cache`,
+      { files: [url] },
+      {
+        timeout: 15000,
+        proxy: false,
+        headers: {
+          Authorization: `Bearer ${CLOUDFLARE_API_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    if (purgeRes.data?.success) {
+      console.log(`  ♻ Cloudflare cache purged: ${url}`);
+      return true;
+    }
+
+    console.warn(
+      `  ⚠ Cloudflare purge rejected for ${url}: ${JSON.stringify(
+        purgeRes.data?.errors || []
+      )}`
+    );
+  } catch (err) {
+    console.warn(
+      `  ❌ Cloudflare purge error for ${url}: ${
+        err?.response?.data?.errors?.[0]?.message || err?.message || err
+      }`
+    );
+  }
+
+  return false;
+}
 
 
 async function warmUrls(urls, country, logger, batchSize = 1, delay = 2000) {
@@ -210,20 +278,33 @@ async function warmUrls(urls, country, logger, batchSize = 1, delay = 2000) {
       batch.map(async (url) => {
         const t0 = Date.now();
         try {
-          const res = await retryableGet(
+          let res = await retryableGet(
             url,
             buildAxiosCfg(country, { timeout: 15000 }),
             3
           );
-          const dt = Date.now() - t0;
+          const initialCache = readCacheHeaders(res.headers);
+          let purgeMessage = "";
 
-          const lsCache = res.headers["x-litespeed-cache"] || "N/A";
-          const cfCache = res.headers["cf-cache-status"] || "N/A";
-          const cfRay = res.headers["cf-ray"] || "";
-          const cfPop = cfRay.includes("-")
-            ? cfRay.slice(cfRay.lastIndexOf("-") + 1)
-            : "N/A";
-          const cfAge = res.headers.age || "N/A";
+          // Kalau LiteSpeed benar-benar MISS, buang salinan CF lalu warm ulang.
+          // Status N/A tidak memicu purge karena tidak membuktikan cache miss.
+          if (isLiteSpeedMiss(initialCache.lsCache)) {
+            const purged = await purgeCloudflareCache(url);
+            if (purged) {
+              await sleep(750);
+              res = await retryableGet(
+                url,
+                buildAxiosCfg(country, { timeout: 15000 }),
+                3
+              );
+              purgeMessage = `Cloudflare purged and rewarmed (initial ls=${initialCache.lsCache})`;
+            }
+          }
+
+          const dt = Date.now() - t0;
+          const { lsCache, cfCache, cfPop, cfAge } = readCacheHeaders(
+            res.headers
+          );
           const cfAgeLabel = cfAge === "N/A" ? cfAge : `${cfAge}s`;
 
           console.log(
@@ -240,7 +321,7 @@ async function warmUrls(urls, country, logger, batchSize = 1, delay = 2000) {
             cfPop,
             responseMs: dt,
             error: 0,
-            message: "",
+            message: purgeMessage,
           });
         } catch (err) {
           const dt = Date.now() - t0;
