@@ -56,8 +56,8 @@ class AppsScriptLogger {
     url = "",
     status = "",
     lsCache = "",
-    qcCache = "",
-    qcPop = "",
+    cfCache = "",
+    cfPop = "",
     responseMs = "",
     error = 0,
     message = "",
@@ -70,8 +70,8 @@ class AppsScriptLogger {
       url, // url
       status, // status code
       lsCache, // litespeed_cache (x-litespeed-cache)
-      qcCache, // quic_cloud_cache (x-qc-cache)
-      qcPop, // quic_cloud_pop (x-qc-pop)
+      cfCache, // cloudflare_cache (cf-cache-status)
+      cfPop, // cloudflare_pop (suffix cf-ray, mis. SIN)
       typeof responseMs === "number" ? responseMs : "", // response_ms
       error ? 1 : 0, // error (0/1)
       message, // message
@@ -218,11 +218,16 @@ async function warmUrls(urls, country, logger, batchSize = 1, delay = 2000) {
           const dt = Date.now() - t0;
 
           const lsCache = res.headers["x-litespeed-cache"] || "N/A";
-          const qcCache = res.headers["x-qc-cache"] || "N/A";
-          const qcPop = res.headers["x-qc-pop"] || "N/A";
+          const cfCache = res.headers["cf-cache-status"] || "N/A";
+          const cfRay = res.headers["cf-ray"] || "";
+          const cfPop = cfRay.includes("-")
+            ? cfRay.slice(cfRay.lastIndexOf("-") + 1)
+            : "N/A";
+          const cfAge = res.headers.age || "N/A";
+          const cfAgeLabel = cfAge === "N/A" ? cfAge : `${cfAge}s`;
 
           console.log(
-            `[${country}] ${res.status} ls=${lsCache} qc=${qcCache} pop=${qcPop} ${dt}ms - ${url}`
+            `[${country}] ${res.status} ls=${lsCache} cf=${cfCache} pop=${cfPop} age=${cfAgeLabel} ${dt}ms - ${url}`
           );
 
           // Kumpulkan log (TIDAK dikirim sekarang; dikirim sekali di akhir run)
@@ -231,8 +236,8 @@ async function warmUrls(urls, country, logger, batchSize = 1, delay = 2000) {
             url,
             status: res.status,
             lsCache,
-            qcCache,
-            qcPop,
+            cfCache,
+            cfPop,
             responseMs: dt,
             error: 0,
             message: "",

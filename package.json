@@ -1,7 +1,7 @@
 {
   "name": "komodo-cache-warmer",
   "version": "2.0.0",
-  "description": "Cache warmer script for Diving Komodo using LiteSpeed + QUIC.cloud and sitemap",
+  "description": "Cache warmer script for Diving Komodo using Cloudflare + LiteSpeed and sitemap",
   "main": "index.js",
   "type": "module",
   "scripts": {
@@ -12,8 +12,8 @@
   "keywords": [
     "cache",
     "warmer",
+    "cloudflare",
     "litespeed",
-    "quic-cloud",
     "wordpress",
     "sitemap",
     "seo"
