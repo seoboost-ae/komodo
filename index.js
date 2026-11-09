@@ -58,7 +58,7 @@ class AppsScriptLogger {
     country = "",
     url = "",
     status = "",
-    lsCache = "",
+    originCache = "",
     cfCache = "",
     cfPop = "",
     responseMs = "",
@@ -72,7 +72,7 @@ class AppsScriptLogger {
       country, // country
       url, // url
       status, // status code
-      lsCache, // litespeed_cache (x-litespeed-cache)
+      originCache, // vercel_cache (x-vercel-cache)
       cfCache, // cloudflare_cache (cf-cache-status)
       cfPop, // cloudflare_pop (suffix cf-ray, mis. SIN)
       typeof responseMs === "number" ? responseMs : "", // response_ms
@@ -97,7 +97,7 @@ class AppsScriptLogger {
       const res = await axios.post(
         APPS_SCRIPT_URL,
         { sheetName: this.sheetName, rows: this.rows },
-        { timeout: 60000, headers: { "Content-Type": "application/json" } }
+        { timeout: 120000, headers: { "Content-Type": "application/json" } }
       );
       console.log("Apps Script response:", res.status, res.data);
       if (!res.data?.ok) console.warn("Apps Script replied error:", res.data);
@@ -124,6 +124,16 @@ function buildAxiosCfg(country, extra = {}) {
   return cfg;
 }
 
+function buildRevalidationAxiosCfg(country) {
+  const cfg = buildAxiosCfg(country, { timeout: 15000 });
+  cfg.headers = {
+    ...cfg.headers,
+    "Cache-Control": "no-cache",
+    Pragma: "no-cache",
+  };
+  return cfg;
+}
+
 /* ====== SITEMAP ====== */
 async function fetchWithProxy(url, country, timeout = 15000) {
   const cfg = buildAxiosCfg(country, { timeout });
@@ -133,24 +143,40 @@ async function fetchWithProxy(url, country, timeout = 15000) {
 
 async function fetchIndexSitemaps(domain, country) {
   try {
-    const xml = await fetchWithProxy(
-      `${domain}/sitemap.xml`,
-      country,
-      15000
-    );
+    const xml = await fetchWithProxy(`${domain}/sitemap.xml`, country);
     const result = await parseStringPromise(xml, {
       explicitArray: false,
       ignoreAttrs: true,
     });
     const sitemapList = result?.sitemapindex?.sitemap;
-    if (!sitemapList) return [];
-    const sitemaps = Array.isArray(sitemapList) ? sitemapList : [sitemapList];
-    return sitemaps.map((entry) => entry.loc).filter(Boolean);
+    if (sitemapList) {
+      return {
+        sitemaps: (Array.isArray(sitemapList) ? sitemapList : [sitemapList])
+          .map((e) => e.loc)
+          .filter(Boolean),
+        urls: [],
+      };
+    }
+
+    // Some sites redirect /sitemap.xml to a sitemap containing URLs
+    // directly instead of a sitemap index containing child sitemap files.
+    const urlList = result?.urlset?.url;
+    if (urlList) {
+      return {
+        sitemaps: [],
+        urls: (Array.isArray(urlList) ? urlList : [urlList])
+          .map((e) => e.loc)
+          .filter(Boolean),
+      };
+    }
+
+    console.warn(`[${country}] Sitemap response has no <sitemapindex> or <urlset>`);
+    return { sitemaps: [], urls: [] };
   } catch (err) {
     console.warn(
-      `[${country}] ❌ Failed to fetch sitemap index: ${err?.message || err}`
+      `[${country}] Failed to fetch sitemap index: ${err?.message || err}`
     );
-    return [];
+    return { sitemaps: [], urls: [] };
   }
 }
 
@@ -201,7 +227,7 @@ async function retryableGet(url, cfg, retries = 3) {
 }
 
 function readCacheHeaders(headers) {
-  const lsCache = headers["x-litespeed-cache"] || "N/A";
+  const originCache = headers["x-vercel-cache"] || "N/A";
   const cfCache = headers["cf-cache-status"] || "N/A";
   const cfRay = headers["cf-ray"] || "";
   const cfPop = cfRay.includes("-")
@@ -209,10 +235,10 @@ function readCacheHeaders(headers) {
     : "N/A";
   const cfAge = headers.age || "N/A";
 
-  return { lsCache, cfCache, cfPop, cfAge };
+  return { originCache, cfCache, cfPop, cfAge };
 }
 
-function isLiteSpeedMiss(value) {
+function isVercelMiss(value) {
   return String(value)
     .toLowerCase()
     .split(",")
@@ -286,9 +312,29 @@ async function warmUrls(urls, country, logger, batchSize = 1, delay = 2000) {
           const initialCache = readCacheHeaders(res.headers);
           let purgeMessage = "";
 
-          // Kalau LiteSpeed benar-benar MISS, buang salinan CF lalu warm ulang.
-          // Status N/A tidak memicu purge karena tidak membuktikan cache miss.
-          if (isLiteSpeedMiss(initialCache.lsCache)) {
+          if (String(initialCache.originCache).toLowerCase() === "stale") {
+            const purged = await purgeCloudflareCache(url);
+            if (purged) await sleep(750);
+            purgeMessage = purged
+              ? "Cloudflare purged; requesting Vercel revalidation (initial vercel=STALE)"
+              : "Requesting Vercel revalidation (initial vercel=STALE)";
+
+            try {
+              res = await retryableGet(
+                url,
+                buildRevalidationAxiosCfg(country),
+                1
+              );
+            } catch (revalidationError) {
+              const message = revalidationError?.message || "revalidation failed";
+              console.warn(
+                `[${country}] Vercel synchronous revalidation failed for ${url}: ${message}`
+              );
+              purgeMessage += `; revalidation failed: ${message}`;
+            }
+          } else if (isVercelMiss(initialCache.originCache)) {
+            // Kalau Vercel MISS, buang salinan CF lalu warm ulang.
+            // Status selain HIT dipurge setelah respons akhir dibaca di bawah.
             const purged = await purgeCloudflareCache(url);
             if (purged) {
               await sleep(750);
@@ -297,18 +343,37 @@ async function warmUrls(urls, country, logger, batchSize = 1, delay = 2000) {
                 buildAxiosCfg(country, { timeout: 15000 }),
                 3
               );
-              purgeMessage = `Cloudflare purged and rewarmed (initial ls=${initialCache.lsCache})`;
+              purgeMessage = `Cloudflare purged and rewarmed (initial vercel=${initialCache.originCache})`;
             }
           }
 
           const dt = Date.now() - t0;
-          const { lsCache, cfCache, cfPop, cfAge } = readCacheHeaders(
+          const { originCache, cfCache, cfPop, cfAge } = readCacheHeaders(
             res.headers
           );
           const cfAgeLabel = cfAge === "N/A" ? cfAge : `${cfAge}s`;
 
+          const originCacheStatus = String(originCache).trim().toLowerCase();
+          if (originCacheStatus !== "hit") {
+            console.log(
+              `[${country}] Vercel cache ${originCache}; purging Cloudflare because status is not HIT: ${url}`
+            );
+            if (
+              originCacheStatus === "stale" &&
+              String(cfCache).toLowerCase() === "hit"
+            ) {
+              console.warn(
+                `[${country}] Cloudflare still served a cached STALE response: ${url}`
+              );
+            }
+            const purged = await purgeCloudflareCache(url);
+            purgeMessage += purged
+              ? `; Vercel ${originCache}; Cloudflare purged`
+              : `; Vercel ${originCache}; Cloudflare purge unavailable or failed`;
+          }
+
           console.log(
-            `[${country}] ${res.status} ls=${lsCache} cf=${cfCache} pop=${cfPop} age=${cfAgeLabel} ${dt}ms - ${url}`
+            `[${country}] ${res.status} vercel=${originCache} cf=${cfCache} pop=${cfPop} age=${cfAgeLabel} ${dt}ms - ${url}`
           );
 
           // Kumpulkan log (TIDAK dikirim sekarang; dikirim sekali di akhir run)
@@ -316,7 +381,7 @@ async function warmUrls(urls, country, logger, batchSize = 1, delay = 2000) {
             country,
             url,
             status: res.status,
-            lsCache,
+            originCache,
             cfCache,
             cfPop,
             responseMs: dt,
@@ -355,13 +420,14 @@ async function warmUrls(urls, country, logger, batchSize = 1, delay = 2000) {
     for (const [country, domain] of Object.entries(DOMAINS_MAP)) {
       console.log(`\n========== [${country.toUpperCase()}] MULAI ==========`);
 
-      const sitemapList = await fetchIndexSitemaps(domain, country);
+      const { sitemaps: sitemapList, urls: directUrls } =
+        await fetchIndexSitemaps(domain, country);
       const urlArrays = await Promise.all(
         sitemapList.map((sitemapUrl) =>
           fetchUrlsFromSitemap(sitemapUrl, country)
         )
       );
-      const urls = urlArrays.flat().filter(Boolean);
+      const urls = [...directUrls, ...urlArrays.flat()].filter(Boolean);
 
       console.log(`[${country}] Found ${urls.length} URLs`);
       logger.log({

@@ -1,7 +1,7 @@
 {
   "name": "komodo-cache-warmer",
   "version": "2.0.0",
-  "description": "Cache warmer script for Diving Komodo using Cloudflare + LiteSpeed and sitemap",
+  "description": "Cache warmer script for Diving Komodo using Cloudflare + Vercel and sitemap",
   "main": "index.js",
   "type": "module",
   "scripts": {
@@ -13,7 +13,7 @@
     "cache",
     "warmer",
     "cloudflare",
-    "litespeed",
+    "vercel",
     "wordpress",
     "sitemap",
     "seo"
